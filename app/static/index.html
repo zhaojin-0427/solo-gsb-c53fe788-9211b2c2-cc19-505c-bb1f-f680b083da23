@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>藏品光照轮换台</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header>
+  <h1>藏品光照轮换台</h1>
+  <p class="subtitle">面向博物馆策展人员的展品光照排班工具 · 剂量受控 · OR-Tools 求解(限时 10 秒)</p>
+</header>
+
+<main>
+  <section class="card" id="settings-card">
+    <h2>① 排班设置</h2>
+    <div class="form-row" id="settings-form"></div>
+  </section>
+
+  <section class="card" id="artifacts-card">
+    <h2>② 藏品(最多 8 件)</h2>
+    <div class="table-wrap">
+      <table id="artifacts-table">
+        <thead>
+          <tr>
+            <th>名称</th><th>剩余光照预算 (lx·h)</th><th>优先级 (1~10)</th>
+            <th>最低展出时数 (h)</th><th>操作</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+        <tfoot></tfoot>
+      </table>
+    </div>
+  </section>
+
+  <section class="card" id="locks-card">
+    <h2>③ 时段锁定</h2>
+    <p class="hint">点击单元格循环切换:无 → 展位 1..N → 库房。锁定后该藏品在对应时段必须处于指定位置。</p>
+    <div class="table-wrap" id="locks-grid"></div>
+  </section>
+
+  <section class="card" id="solve-card">
+    <h2>④ 求解与结果</h2>
+    <div class="solve-bar">
+      <button id="solve-btn" class="primary">开始求解</button>
+      <span id="solve-msg"></span>
+    </div>
+    <div id="result-area"><p class="hint">尚未求解。设置参数后点击“开始求解”。</p></div>
+  </section>
+
+  <section class="card" id="history-card">
+    <h2>⑤ 历史排班</h2>
+    <div id="schedules-list"></div>
+  </section>
+</main>
+
+<footer>
+  <p>约束:每件每时段恰在一个展位或库房 · 库房不耗光照 · 展位剂量 = 照度 × 小时,不超预算 · 跨展位移动须间隔至少一小时库房</p>
+</footer>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
