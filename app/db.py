@@ -199,22 +199,57 @@ def set_lock(artifact_id: int, slot: int, location) -> None:
 
 # ---------- 排班历史 ----------
 
-def _snapshot() -> dict:
-    settings = get_settings()
+def read_config() -> dict:
+    """在同一个 SQLite 事务内读取设置、藏品与锁定,返回求解输入快照。
+
+    三类数据来自数据库的同一一致视图:读取期间其他事务的提交不会影响
+    本快照。求解最长耗时 10 秒,期间配置可被其他请求修改,但调用方拿到
+    的始终是求解开始那一刻的配置,保存历史时也必须沿用这份快照。
+    """
+    c = _conn()
+    try:
+        with _lock:
+            # 显式开启事务,使下面三条 SELECT 共享同一读快照
+            # (sqlite3 默认隔离级别不会为 SELECT 自动开启事务)。
+            c.execute("BEGIN")
+            srow = c.execute("SELECT * FROM settings WHERE id = 1").fetchone()
+            arows = c.execute(
+                "SELECT * FROM artifacts ORDER BY position, id"
+            ).fetchall()
+            lrows = c.execute("SELECT * FROM locks").fetchall()
+            c.execute("COMMIT")
+    except BaseException:
+        c.execute("ROLLBACK")
+        c.close()
+        raise
+    c.close()
+
+    lux = json.loads(srow["lux"])
+    while len(lux) < MAX_BOOTHS:
+        lux.append(_DEFAULT_SETTINGS["lux"][0])
+    lux = lux[:MAX_BOOTHS]
+    locks = []
+    for r in lrows:
+        loc = r["location"]
+        locks.append({
+            "artifact_id": r["artifact_id"],
+            "slot": r["slot"],
+            "location": "storage" if loc == "storage" else int(loc),
+        })
     return {
-        "num_slots": settings["num_slots"],
-        "booths": settings["lux"][: settings["num_booths"]],
-        "artifacts": list_artifacts(),
-        "locks": list_locks(),
+        "num_slots": srow["num_slots"],
+        "booths": lux[: srow["num_booths"]],
+        "artifacts": [dict(r) for r in arows],
+        "locks": locks,
     }
 
 
-def current_config() -> dict:
-    return _snapshot()
+def save_schedule(result: dict, snapshot: dict) -> int:
+    """保存一次求解。snapshot 必须是本次求解实际使用的 read_config() 快照,
 
-
-def save_schedule(result: dict) -> int:
-    snapshot = _snapshot()
+    保证结果(含无解 / 超时状态)与其输入配置严格对应:求解期间对设置、
+    藏品或锁定的修改不会污染这条历史记录。
+    """
     with _lock, _conn() as c:
         cur = c.execute(
             "INSERT INTO schedules (created_at, status, weighted_hours, transitions, snapshot, result)"

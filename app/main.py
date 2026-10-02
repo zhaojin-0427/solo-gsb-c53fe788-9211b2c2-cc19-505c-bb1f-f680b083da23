@@ -124,11 +124,14 @@ def put_lock(body: LockIn) -> dict:
 
 @app.post("/api/solve")
 def solve() -> dict:
-    config = db.current_config()
+    # 一次求解的设置、藏品、锁定取自同一数据库一致视图;求解期间(最长
+    # 10 秒)其他请求可以继续编辑,但 result 必须与这份 snapshot 一起保存,
+    # 保存时不得重读配置,以免旧结果配上新快照。
+    config = db.read_config()
     if not config["artifacts"]:
         raise HTTPException(400, "请先添加至少一件藏品")
     result = solve_schedule(config, time_limit=SOLVE_TIME_LIMIT)
-    schedule_id = db.save_schedule(result)
+    schedule_id = db.save_schedule(result, config)
     return db.get_schedule(schedule_id)
 
 
