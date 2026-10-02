@@ -10,7 +10,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from . import db
-from .solver import solve_schedule
+from .solver import solve_schedule, STATUS_ERROR
 
 SOLVE_TIME_LIMIT = 10.0  # 求解限时 10 秒
 
@@ -124,11 +124,28 @@ def put_lock(body: LockIn) -> dict:
 
 @app.post("/api/solve")
 def solve() -> dict:
-    config = db.current_config()
-    if not config["artifacts"]:
+    # 1. 从同一数据库一致视图读出本次求解的设置 / 藏品 / 锁定。
+    # 2. 求解(最长 10 秒)期间不持数据库锁,其他请求可继续编辑,
+    #    那些编辑只影响后续求解,不影响本次快照与结果。
+    # 3. 无论最优、可行、无解、超时还是求解器异常,结果都与这份
+    #    输入快照成对保存,历史记录不会出现旧结果配新快照的错配。
+    snapshot = db.current_config()
+    if not snapshot["artifacts"]:
         raise HTTPException(400, "请先添加至少一件藏品")
-    result = solve_schedule(config, time_limit=SOLVE_TIME_LIMIT)
-    schedule_id = db.save_schedule(result)
+    try:
+        result = solve_schedule(snapshot, time_limit=SOLVE_TIME_LIMIT)
+    except Exception as exc:  # 求解器异常:记录错误状态,仍与输入快照配对
+        result = {
+            "status": STATUS_ERROR,
+            "weighted_hours": None,
+            "transitions": None,
+            "wall_time": None,
+            "assignment": None,
+            "doses": None,
+            "hours": None,
+            "error": str(exc)[:200],
+        }
+    schedule_id = db.save_schedule(result, snapshot)
     return db.get_schedule(schedule_id)
 
 

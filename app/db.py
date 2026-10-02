@@ -5,6 +5,13 @@
 - artifacts: 藏品(名称、剩余光照预算、优先级、最低展出时数)
 - locks: 锁定(藏品, 时段) -> 位置('storage' 或展位序号字符串)
 - schedules: 求解历史,保存输入快照与结果,刷新后仍可查看
+
+并发约定:
+一次求解所需的设置 / 藏品 / 锁定由 current_config() 在同一个连接、
+同一个事务中读出,得到与时间点绑定的一致输入快照;求解期间(最长 10 秒)
+不持有任何数据库锁,其他请求可以继续编辑配置。保存历史时必须把求解结果
+连同当初读到的那份快照一起交给 save_schedule(),因此求解期间的任何编辑
+都不会串改进行中的求解记录,已保存记录和并发求解各自保持输入与结果对应。
 """
 from __future__ import annotations
 
@@ -68,7 +75,7 @@ _SEED_ARTIFACTS = [
 
 
 def _conn() -> sqlite3.Connection:
-    c = sqlite3.connect(DB_PATH)
+    c = sqlite3.connect(DB_PATH, timeout=5.0)
     c.row_factory = sqlite3.Row
     c.execute("PRAGMA foreign_keys = ON")
     return c
@@ -199,22 +206,66 @@ def set_lock(artifact_id: int, slot: int, location) -> None:
 
 # ---------- 排班历史 ----------
 
-def _snapshot() -> dict:
-    settings = get_settings()
+def _read_snapshot(c: sqlite3.Connection) -> dict:
+    """在调用方给定的连接/事务内读取求解输入快照。
+
+    settings / artifacts / locks 必须来自同一连接的同一事务,
+    才能保证彼此一致(读事务内看不到其他连接已提交的改动)。
+    """
+    row = c.execute("SELECT * FROM settings WHERE id = 1").fetchone()
+    lux = json.loads(row["lux"])
+    while len(lux) < MAX_BOOTHS:
+        lux.append(_DEFAULT_SETTINGS["lux"][0])
+    settings = {
+        "num_slots": row["num_slots"],
+        "num_booths": row["num_booths"],
+        "lux": lux[:MAX_BOOTHS],
+    }
+    artifacts = [
+        dict(r)
+        for r in c.execute("SELECT * FROM artifacts ORDER BY position, id").fetchall()
+    ]
+    locks = []
+    for r in c.execute("SELECT * FROM locks").fetchall():
+        loc = r["location"]
+        locks.append({
+            "artifact_id": r["artifact_id"],
+            "slot": r["slot"],
+            "location": "storage" if loc == "storage" else int(loc),
+        })
     return {
         "num_slots": settings["num_slots"],
         "booths": settings["lux"][: settings["num_booths"]],
-        "artifacts": list_artifacts(),
-        "locks": list_locks(),
+        "artifacts": artifacts,
+        "locks": locks,
     }
 
 
 def current_config() -> dict:
-    return _snapshot()
+    """读取一次求解的一致输入快照。
+
+    设置、藏品、锁定在同一个连接的同一事务中读出(事务开始于首次 SELECT,
+    SQLite DEFERRED 读事务在提交前看到的是同一数据库版本);读取只持续
+    毫秒级,锁在读出后立即释放,随后进行的长耗时求解不持任何锁,
+    求解期间其他请求可正常编辑配置。
+    """
+    c = _conn()
+    with _lock:
+        try:
+            c.execute("BEGIN")
+            return _read_snapshot(c)
+        finally:
+            c.rollback()
+            c.close()
 
 
-def save_schedule(result: dict) -> int:
-    snapshot = _snapshot()
+def save_schedule(result: dict, snapshot: dict) -> int:
+    """把一次求解的结果与它对应的输入快照成对写入历史。
+
+    snapshot 必须是本次求解当初通过 current_config() 读到的同一份对象,
+    不允许在此重读当前配置——否则求解期间的编辑会让结果与快照错配。
+    无解 / 超时 / 求解错误同样会带快照入库,保持时间轴与剂量说明有据可查。
+    """
     with _lock, _conn() as c:
         cur = c.execute(
             "INSERT INTO schedules (created_at, status, weighted_hours, transitions, snapshot, result)"

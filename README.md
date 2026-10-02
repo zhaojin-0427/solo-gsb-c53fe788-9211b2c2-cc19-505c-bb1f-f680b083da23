@@ -2,7 +2,9 @@
 
 面向博物馆策展人员的藏品光照排班工具:在光照预算约束下,为最多 8 件藏品在最多 3 个单件展位与库房之间安排最多 72 个连续一小时时段,由 OR-Tools CP-SAT 求解(限时 10 秒),结果以原生 JavaScript 页面展示并持久保存。
 
-## 一键启动(Docker Compose)
+## 快速开始
+
+### 方式一:Docker Compose(推荐,一键启动)
 
 ```bash
 docker compose up --build
@@ -10,16 +12,40 @@ docker compose up --build
 
 启动后在浏览器访问:**http://localhost:8000**
 
-数据保存在名为 `scheduler-data` 的 Docker 卷中(SQLite),容器重启、页面刷新后历史排班仍可查看。
+停止服务按 `Ctrl+C`;如需后台运行可用 `docker compose up --build -d`,用
+`docker compose down` 停止。
 
-## 本地开发(不用 Docker)
+数据保存在名为 `scheduler-data` 的 Docker 卷中(SQLite),容器重启、
+页面刷新后历史排班仍可查看。
+
+### 方式二:本地运行(不用 Docker)
 
 ```bash
 pip install -r requirements.txt
 uvicorn app.main:app --reload
 ```
 
-同样访问 http://localhost:8000 。SQLite 数据库默认写入 `./data/scheduler.db`(可用环境变量 `DATA_DIR` 修改)。
+同样在浏览器访问 **http://localhost:8000** 。SQLite 数据库默认写入
+`./data/scheduler.db`(可用环境变量 `DATA_DIR` 修改)。
+
+## 求解与编辑的并发一致性
+
+一次求解(最长 10 秒)所需的**时段数、展位照度、藏品与锁定**,在求解开始时
+从 SQLite 的**同一个连接、同一事务**中读出,作为该次求解固定的输入快照;
+随后 CP-SAT 只基于这份快照计算,保存历史时把求解结果**连同这同一份快照**
+成对写入,而不会重新读取当前配置。
+
+因此:
+
+- 求解进行中,其他人(或其他浏览器标签页)仍可照常修改设置、藏品与锁定,
+  这些编辑只影响**之后**发起的求解,不会串改正在进行的那次;
+- 已保存的每条历史记录始终与其输入快照一一对应——即使求解期间时段数从
+  12 改成 36,旧记录的时间轴仍是 12 段、剂量仍按当时照度计算,不会出现
+  时间轴截断或剂量说明错配;
+- `最优解`、`可行解`、`无解`、`超时未找到方案`(以及求解器错误)各种状态
+  都会与输入快照一起保存,刷新页面或重启容器后均可查看;
+- 多个求解请求并发执行时,各自保存各自开始时的快照与对应结果,互不影响;
+- 历史记录格式保持向后兼容,升级前已保存的排班依旧可以正常查看。
 
 ## 功能与规则
 
@@ -60,5 +86,5 @@ requirements.txt
 | PUT | `/api/settings` | 更新时段数 / 展位数 / 各展位照度 |
 | POST / PUT / DELETE | `/api/artifacts[/{id}]` | 藏品增改删 |
 | PUT | `/api/locks` | 设置或清除某藏品某时段的锁定 |
-| POST | `/api/solve` | 求解并保存排班(限时 10 秒) |
+| POST | `/api/solve` | 基于开始时的一致输入快照求解并保存(限时 10 秒;含无解/超时/错误状态) |
 | GET / DELETE | `/api/schedules[/{id}]` | 查看 / 删除历史排班 |
